@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <title>Spring Boot WebSocket Chat</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+
+    <style>
+        body { background-color: #f0f2f5; }
+        /* Make chat and user list scrollable */
+        #chat-area { height: 400px; overflow-y: auto; }
+        #user-list { height: 400px; overflow-y: auto; }
+        .message-bubble .sender { font-weight: bold; font-size: 0.85rem; display: block; margin-bottom: 2px; }
+    </style>
+</head>
+<body>
+
+<div class="container mt-5">
+    <div class="row">
+        <div class="col-md-8">
+            <div class="card shadow-lg">
+                <div class="card-header bg-dark text-white text-center">
+                    <h3><i class="bi bi-chat-dots-fill"></i> Real-time Chat</h3>
+                </div>
+                <div class="card-body">
+                    <div class="row g-2 mb-3 align-items-center">
+                        <div class="col">
+                            <input type="text" id="sender-input" class="form-control" placeholder="Enter your name">
+                        </div>
+                        <div class="col-auto">
+                            <button id="connect-btn" class="btn btn-success w-100">Connect</button>
+                            <button id="disconnect-btn" class="btn btn-danger w-100 d-none">Disconnect</button>
+                        </div>
+                    </div>
+
+                    <div id="chat-area" class="border rounded p-3 mb-3 bg-light">
+                        <div id="connection-status" class="text-muted text-center">Enter your name and connect to start chatting.</div>
+                    </div>
+
+                    <form id="message-form" class="input-group">
+                        <input type="text" id="message-input" class="form-control" placeholder="Type a message..." disabled>
+                        <button id="send-btn" class="btn btn-primary" type="submit" disabled>
+                            <i class="bi bi-send-fill"></i> Send
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-md-4">
+            <div class="card shadow-lg">
+                <div class="card-header bg-secondary text-white text-center">
+                    <h3><i class="bi bi-people-fill"></i> Online Users</h3>
+                </div>
+                <div id="user-list" class="list-group list-group-flush p-2">
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/sockjs-client@1.6.1/dist/sockjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/stompjs@2.3.3/lib/stomp.min.js"></script>
+
+<script type="text/javascript">
+    let stompClient = null;
+
+    // DOM Elements
+    const connectBtn = document.getElementById('connect-btn');
+    const disconnectBtn = document.getElementById('disconnect-btn');
+    const sendBtn = document.getElementById('send-btn');
+    const senderInput = document.getElementById('sender-input');
+    const messageInput = document.getElementById('message-input');
+    const chatArea = document.getElementById('chat-area');
+    const messageForm = document.getElementById('message-form');
+    const connectionStatus = document.getElementById('connection-status');
+    const userList = document.getElementById('user-list'); // <-- NEW
+
+    function connect(event) {
+        event.preventDefault();
+        const sender = senderInput.value.trim();
+        if (sender) {
+            const socket = new SockJS('/ws');
+            stompClient = Stomp.over(socket);
+
+            // --- MODIFIED: Send username in connection headers ---
+            const headers = {
+                'username': sender
+            };
+            stompClient.connect(headers, onConnected, onError);
+        } else {
+            alert("Please enter your name.");
+        }
+    }
+
+    function onConnected() {
+        // --- NEW: Subscribe to user-specific history queue ---
+        stompClient.subscribe('/user/queue/history', onHistoryReceived);
+
+        // --- Subscribe to public chat topic ---
+        stompClient.subscribe('/topic/chat', onMessageReceived);
+
+        // --- NEW: Subscribe to user list topic ---
+        stompClient.subscribe('/topic/users', onUserListReceived);
+
+        // --- NEW: Request chat history ---
+        stompClient.send("/app/chat.getHistory", {}, {});
+
+        // Send a system "joined" message (this is optional but nice)
+        const sender = senderInput.value.trim();
+        stompClient.send("/app/chat.sendMessage", {}, JSON.stringify({ sender: 'System', content: sender + ' has joined!' }));
+
+        setUiConnected(true);
+    }
+
+    function onError(error) {
+        connectionStatus.textContent = 'Could not connect to WebSocket server. Please refresh this page to try again!';
+        connectionStatus.style.color = 'red';
+    }
+
+    function disconnect() {
+        if (stompClient) {
+            const sender = senderInput.value.trim();
+            // Send a system "left" message
+            stompClient.send("/app/chat.sendMessage", {}, JSON.stringify({ sender: 'System', content: sender + ' has left.' }));
+
+            stompClient.disconnect();
+        }
+        setUiConnected(false);
+    }
+
+    function sendMessage(event) {
+        event.preventDefault();
+        const messageContent = messageInput.value.trim();
+        const sender = senderInput.value.trim();
+        if (messageContent && stompClient) {
+            const chatMessage = { sender: sender, content: messageContent };
+            // --- MODIFIED: Use the new mapping ---
+            stompClient.send("/app/chat.sendMessage", {}, JSON.stringify(chatMessage));
+            messageInput.value = '';
+        }
+    }
+
+    // --- NEW: Function to handle receiving the user list ---
+    function onUserListReceived(payload) {
+        const users = JSON.parse(payload.body);
+        userList.innerHTML = ''; // Clear the list
+        users.forEach(user => {
+            const userElement = document.createElement('li');
+            userElement.classList.add('list-group-item');
+
+            // Add a green dot for online status
+            const statusIcon = document.createElement('i');
+            statusIcon.classList.add('bi', 'bi-circle-fill', 'text-success', 'me-2');
+            statusIcon.style.fontSize = '0.75rem';
+
+            userElement.appendChild(statusIcon);
+            userElement.appendChild(document.createTextNode(user));
+            userList.appendChild(userElement);
+        });
+    }
+
+    // --- NEW: Function to handle receiving chat history ---
+    function onHistoryReceived(payload) {
+        const history = JSON.parse(payload.body);
+        // Loop through the history and add each message
+        history.forEach(message => {
+            // Re-use the onMessageReceived logic, but pass the message object
+            displayMessage(message);
+        });
+    }
+
+    // --- RENAMED: from onMessageReceived to displayMessage ---
+    // This function now just handles adding a message to the UI
+    function displayMessage(message) {
+        const messageWrapper = document.createElement('div');
+        const messageBubble = document.createElement('div');
+        messageBubble.classList.add('p-2', 'px-3', 'rounded', 'message-bubble');
+        messageBubble.style.maxWidth = '75%';
+
+        const currentUser = senderInput.value.trim();
+
+        if (message.sender === currentUser) {
+            messageWrapper.classList.add('d-flex', 'justify-content-end', 'mb-2');
+            messageBubble.classList.add('bg-primary', 'text-white');
+            messageBubble.textContent = message.content;
+        } else {
+            messageWrapper.classList.add('d-flex', 'justify-content-start', 'mb-2');
+
+            // Special styling for system messages
+            if (message.sender === 'System') {
+                messageBubble.classList.add('bg-light', 'text-muted', 'fst-italic', 'w-100', 'text-center');
+                messageBubble.textContent = message.content;
+            } else {
+                // Regular messages from other users
+                messageBubble.classList.add('bg-secondary', 'text-white');
+                const senderElement = document.createElement('div');
+                senderElement.classList.add('sender');
+                senderElement.textContent = message.sender;
+                messageBubble.appendChild(senderElement);
+
+                const contentElement = document.createElement('span');
+                contentElement.textContent = message.content;
+                messageBubble.appendChild(contentElement);
+            }
+        }
+
+        messageWrapper.appendChild(messageBubble);
+        chatArea.appendChild(messageWrapper);
+        chatArea.scrollTop = chatArea.scrollHeight;
+        if (connectionStatus) connectionStatus.classList.add('d-none');
+    }
+
+    // --- This function now just calls displayMessage ---
+    function onMessageReceived(payload) {
+        const message = JSON.parse(payload.body);
+        displayMessage(message);
+    }
+
+    function setUiConnected(isConnected) {
+        senderInput.disabled = isConnected;
+        messageInput.disabled = !isConnected;
+        sendBtn.disabled = !isConnected;
+
+        if (isConnected) {
+            connectBtn.classList.add('d-none');
+            disconnectBtn.classList.remove('d-none');
+            connectionStatus.textContent = 'You are connected.';
+            connectionStatus.style.color = 'green';
+            chatArea.innerHTML = ''; // Clear chat area
+        } else {
+            connectBtn.classList.remove('d-none');
+            disconnectBtn.classList.add('d-none');
+            connectionStatus.textContent = 'You are disconnected.';
+            connectionStatus.style.color = 'black';
+            userList.innerHTML = ''; // Clear user list
+        }
+    }
+
+    connectBtn.addEventListener('click', connect);
+    disconnectBtn.addEventListener('click', disconnect);
+    messageForm.addEventListener('submit', sendMessage);
+</script>
+</body>
+</html>
