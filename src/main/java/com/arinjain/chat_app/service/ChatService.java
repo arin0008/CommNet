@@ -52,6 +52,7 @@ public class ChatService {
     }
 
     public Set<String> getConnectedUsers() {
+        System.out.println("hi ");
         return new HashSet<>(connectedUsers);
     }
 
